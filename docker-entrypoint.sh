@@ -1,6 +1,8 @@
 #!/bin/sh
-# 若安装了 Google Chrome 则使用，否则 go-rod 自动检测 ARM64 Chromium
+# 检测可用浏览器并设置 ROD_BROWSER_BIN
 if [ -f /usr/bin/google-chrome ]; then
     export ROD_BROWSER_BIN=/usr/bin/google-chrome
+elif [ -f /usr/bin/chromium ]; then
+    export ROD_BROWSER_BIN=/usr/bin/chromium
 fi
 exec "$@"

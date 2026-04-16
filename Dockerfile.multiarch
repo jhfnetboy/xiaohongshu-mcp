@@ -60,7 +60,7 @@ RUN set -eux; \
         wget \
         gnupg \
     ; \
-    # amd64: 安装 Google Chrome；arm64: 跳过
+    # amd64: 安装 Google Chrome；arm64: 安装 Chromium（Debian 官方包，无需运行时下载）
     if [ "$TARGETARCH" = "amd64" ]; then \
         wget -q -O - https://dl.google.com/linux/linux_signing_key.pub \
             | gpg --dearmor -o /usr/share/keyrings/googlechrome-linux-keyring.gpg; \
@@ -69,6 +69,8 @@ http://dl.google.com/linux/chrome/deb/ stable main" \
             > /etc/apt/sources.list.d/google-chrome.list; \
         apt-get update; \
         apt-get install -y --no-install-recommends google-chrome-stable; \
+    else \
+        apt-get install -y --no-install-recommends chromium; \
     fi; \
     # 清理构建工具和缓存
     apt-get remove -y wget gnupg; \
