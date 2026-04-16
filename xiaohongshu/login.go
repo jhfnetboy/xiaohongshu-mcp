@@ -17,29 +17,40 @@ func NewLogin(page *rod.Page) *LoginAction {
 	return &LoginAction{page: page}
 }
 
+// navigatePage 导航到指定 URL，等待 DOMContentLoaded（而非 load 事件，避免 SPA 阻塞）
+func navigatePage(page *rod.Page, url string) error {
+	waitNav := page.WaitNavigation(proto.PageLifecycleEventNameDOMContentLoaded)
+	if err := page.Navigate(url); err != nil {
+		return errors.Wrap(err, "navigate failed")
+	}
+	waitNav()
+	return nil
+}
+
 func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
 	pp := a.page.Context(ctx)
-	pp.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
 
+	if err := navigatePage(pp, "https://www.xiaohongshu.com/explore"); err != nil {
+		return false, err
+	}
 	time.Sleep(1 * time.Second)
 
 	exists, _, err := pp.Has(`.main-container .user .link-wrapper .channel`)
 	if err != nil {
 		return false, errors.Wrap(err, "check login status failed")
 	}
-
 	if !exists {
-		return false, errors.Wrap(err, "login status element not found")
+		return false, nil
 	}
-
 	return true, nil
 }
 
 func (a *LoginAction) Login(ctx context.Context) error {
 	pp := a.page.Context(ctx)
 
-	pp.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
-
+	if err := navigatePage(pp, "https://www.xiaohongshu.com/explore"); err != nil {
+		return err
+	}
 	time.Sleep(2 * time.Second)
 
 	if exists, _, _ := pp.Has(".main-container .user .link-wrapper .channel"); exists {
@@ -47,16 +58,17 @@ func (a *LoginAction) Login(ctx context.Context) error {
 	}
 
 	pp.MustElement(".main-container .user .link-wrapper .channel")
-
 	return nil
 }
 
 func (a *LoginAction) FetchQrcodeImage(ctx context.Context) (string, bool, error) {
 	pp := a.page.Context(ctx)
 
-	pp.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
-
-	time.Sleep(2 * time.Second)
+	if err := navigatePage(pp, "https://www.xiaohongshu.com/explore"); err != nil {
+		return "", false, err
+	}
+	// 等待 JS 渲染
+	time.Sleep(3 * time.Second)
 
 	// 已登录则直接返回
 	if exists, _, _ := pp.Has(".main-container .user .link-wrapper .channel"); exists {
@@ -66,10 +78,10 @@ func (a *LoginAction) FetchQrcodeImage(ctx context.Context) (string, bool, error
 	// 点击"创作中心"按钮触发登录弹窗
 	if btn, err := pp.Element(".reds-button-new.channel-btn"); err == nil {
 		_ = btn.Click(proto.InputMouseButtonLeft, 1)
-		time.Sleep(2 * time.Second)
+		time.Sleep(3 * time.Second)
 	}
 
-	// 等待二维码出现（新版 class: .qrcode-img-box .qrcode-img）
+	// 依次尝试新旧二维码选择器
 	qrcodeSelectors := []string{
 		".qrcode-img-box .qrcode-img",
 		".qrcode-img",
@@ -79,7 +91,7 @@ func (a *LoginAction) FetchQrcodeImage(ctx context.Context) (string, bool, error
 	var src *string
 	var lastErr error
 	for _, sel := range qrcodeSelectors {
-		el, err := pp.Timeout(10 * time.Second).Element(sel)
+		el, err := pp.Timeout(15 * time.Second).Element(sel)
 		if err != nil {
 			lastErr = err
 			continue
