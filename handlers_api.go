@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"net/http"
+	"time"
 
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
 	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
@@ -89,8 +91,11 @@ func (s *AppServer) publishHandler(c *gin.Context) {
 		return
 	}
 
-	// 执行发布
-	result, err := s.xiaohongshuService.PublishContent(c.Request.Context(), &req)
+	// 浏览器操作使用独立 context，避免客户端断连导致 context canceled
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	result, err := s.xiaohongshuService.PublishContent(ctx, &req)
 	if err != nil {
 		respondError(c, http.StatusInternalServerError, "PUBLISH_FAILED",
 			"发布失败", err.Error())
