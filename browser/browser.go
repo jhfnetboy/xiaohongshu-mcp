@@ -60,7 +60,7 @@ func NewBrowser(headless bool, options ...Option) *headless_browser.Browser {
 
 	if data, err := cookieLoader.LoadCookies(); err == nil {
 		opts = append(opts, headless_browser.WithCookies(string(data)))
-		logrus.Debugf("loaded cookies from filesuccessfully")
+		logrus.Debugf("loaded cookies from file successfully")
 	} else {
 		logrus.Warnf("failed to load cookies: %v", err)
 	}

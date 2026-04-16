@@ -43,7 +43,7 @@ func NewPublishVideoAction(page *rod.Page) (*PublishAction, error) {
 	}
 	time.Sleep(1 * time.Second)
 
-	if err := mustClickPublishTab(pp, "上传视频"); err != nil {
+	if err := mustClickPublishTab(pp, "上传视频", "localhost:9222"); err != nil {
 		return nil, errors.Wrap(err, "切换到上传视频失败")
 	}
 

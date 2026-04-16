@@ -2,8 +2,13 @@ package xiaohongshu
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"log/slog"
 	"math/rand"
+	"net"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -40,24 +45,77 @@ func NewPublishImageAction(page *rod.Page) (*PublishAction, error) {
 	// 会耗尽整个 timeout 预算导致后续所有操作 context 已过期
 	pp := page.Timeout(600 * time.Second)
 
-	if err := pp.Navigate(urlOfPublic); err != nil {
-		return nil, errors.Wrap(err, "导航到发布页面失败")
+	// 确保 tab 处于前台（viewport 才有效）
+	_, _ = pp.Activate()
+
+	// 自动 dismiss Chrome 弹窗（如"确认离开页面"等），避免 CDP 命令被阻塞
+	go pp.EachEvent(func(e *proto.PageJavascriptDialogOpening) {
+		logrus.Warnf("[CDP] 自动 dismiss 弹窗: %s", e.Message)
+		_ = proto.PageHandleJavaScriptDialog{Accept: false}.Call(pp)
+	})()
+
+	// getInfo 用 channel 包装 Info()，防止 CDP 阻塞挂死
+	getInfo := func() *proto.TargetTargetInfo {
+		ch := make(chan *proto.TargetTargetInfo, 1)
+		go func() {
+			info, _ := pp.Info()
+			ch <- info
+		}()
+		select {
+		case info := <-ch:
+			return info
+		case <-time.After(5 * time.Second):
+			return nil
+		}
 	}
-	// 等待 SPA 渲染
-	time.Sleep(5 * time.Second)
+
+	// 已在 creator 发布页时跳过 Navigate，避免不必要的页面刷新
+	if info := getInfo(); info == nil || !strings.Contains(info.URL, "creator.xiaohongshu.com/publish") {
+		if err := pp.Navigate(urlOfPublic); err != nil {
+			return nil, errors.Wrap(err, "导航到发布页面失败")
+		}
+		// 等待 SPA 渲染
+		time.Sleep(5 * time.Second)
+	} else {
+		if info := getInfo(); info != nil {
+			logrus.Infof("[CDP] 已在发布页，跳过 Navigate: %s", info.URL)
+		}
+	}
 
 	// 快速检测：如果跳转到了登录页，说明 session 失效，立即返回错误
-	info, _ := pp.Info()
-	if info != nil && strings.Contains(info.URL, "/login") {
+	loginInfo := getInfo()
+	if loginInfo != nil && strings.Contains(loginInfo.URL, "/login") {
 		return nil, errors.New("creator session 失效，请重新扫码登录（DELETE /api/v1/login/cookies 后重新获取二维码）")
 	}
 
-	if err := mustClickPublishTab(pp, "上传图文"); err != nil {
+	// 从 CHROME_CONNECT_URL (如 http://localhost:9222) 解析 DevTools 地址
+	devtoolsAddr := "localhost:9222"
+	if cu := os.Getenv("CHROME_CONNECT_URL"); cu != "" {
+		cu = strings.TrimPrefix(cu, "http://")
+		cu = strings.TrimPrefix(cu, "https://")
+		devtoolsAddr = cu
+	}
+
+	if err := mustClickPublishTab(pp, "上传图文", devtoolsAddr); err != nil {
 		logrus.Errorf("点击上传图文 TAB 失败: %v", err)
 		return nil, err
 	}
 
+	// 等待图文上传区出现（div.upload-content 在点击"上传图文"后才渲染）
+	if _, err := pp.Timeout(20 * time.Second).Element(`div.upload-content`); err != nil {
+		logrus.Warnf("等待图文上传区超时，继续尝试: %v", err)
+	}
 	time.Sleep(1 * time.Second)
+
+	// debug: 截图记录切换后的页面状态
+	debugAfterPath := "/tmp/debug_after_tab.png"
+	if _, err := os.Stat("/app/data"); err == nil {
+		debugAfterPath = "/app/data/debug_after_tab.png"
+	}
+	if img, err := pp.Screenshot(false, nil); err == nil {
+		_ = os.WriteFile(debugAfterPath, img, 0644)
+		logrus.Infof("[debug] 切换 TAB 后截图: %s", debugAfterPath)
+	}
 
 	return &PublishAction{
 		page: pp,
@@ -90,6 +148,152 @@ func (p *PublishAction) Publish(ctx context.Context, content PublishImageContent
 	return nil
 }
 
+// clickTabViaDevTools 通过 Chrome DevTools HTTP API 获取页面 WebSocket URL，
+// 然后直接发送 Input.dispatchMouseEvent，绕过 go-rod browser-level session 的 Input domain 超时问题。
+func clickTabViaDevTools(devtoolsAddr string, targetURL string, x, y float64) error {
+	// 获取 tab 列表
+	resp, err := http.Get(fmt.Sprintf("http://%s/json", devtoolsAddr))
+	if err != nil {
+		return errors.Wrap(err, "获取 Chrome tab 列表失败")
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	var tabs []struct {
+		URL                  string `json:"url"`
+		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+		Type                 string `json:"type"`
+	}
+	if err := json.Unmarshal(body, &tabs); err != nil {
+		return errors.Wrap(err, "解析 tab 列表失败")
+	}
+
+	var wsURL string
+	for _, t := range tabs {
+		if t.Type == "page" && strings.Contains(t.URL, targetURL) {
+			wsURL = t.WebSocketDebuggerURL
+			break
+		}
+	}
+	if wsURL == "" {
+		return errors.Errorf("未找到包含 %s 的 tab", targetURL)
+	}
+
+	// 用 go 的标准库 WebSocket (golang.org/x/net/websocket 不可用，用 gorilla 也可能没装)
+	// 用简单的 HTTP upgrade 自实现
+	conn, err := dialWebSocket(wsURL)
+	if err != nil {
+		return errors.Wrap(err, "连接 tab WebSocket 失败")
+	}
+	defer conn.Close()
+
+	send := func(id int, method string, params map[string]interface{}) error {
+		msg := map[string]interface{}{"id": id, "method": method, "params": params}
+		data, _ := json.Marshal(msg)
+		return wsSend(conn, data)
+	}
+	recv := func() (map[string]interface{}, error) {
+		data, err := wsRecv(conn)
+		if err != nil {
+			return nil, err
+		}
+		var m map[string]interface{}
+		_ = json.Unmarshal(data, &m)
+		return m, nil
+	}
+
+	mouseParams := func(typ string) map[string]interface{} {
+		return map[string]interface{}{
+			"type": typ, "x": x, "y": y,
+			"button": "left", "clickCount": 1, "modifiers": 0,
+		}
+	}
+
+	if err := send(1, "Input.dispatchMouseEvent", mouseParams("mousePressed")); err != nil {
+		return err
+	}
+	if _, err := recv(); err != nil {
+		return err
+	}
+	time.Sleep(50 * time.Millisecond)
+	if err := send(2, "Input.dispatchMouseEvent", mouseParams("mouseReleased")); err != nil {
+		return err
+	}
+	if _, err := recv(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// dialWebSocket 简单实现 WebSocket 握手（不依赖第三方库）
+func dialWebSocket(wsURL string) (net.Conn, error) {
+	// ws://localhost:9222/devtools/page/XXX → localhost:9222 + /devtools/page/XXX
+	u := strings.TrimPrefix(wsURL, "ws://")
+	slash := strings.Index(u, "/")
+	host := u[:slash]
+	path := u[slash:]
+
+	conn, err := net.Dial("tcp", host)
+	if err != nil {
+		return nil, err
+	}
+
+	key := "dGhlIHNhbXBsZSBub25jZQ=="
+	req := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n", path, host, key)
+	if _, err := conn.Write([]byte(req)); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	buf := make([]byte, 4096)
+	n, err := conn.Read(buf)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if !strings.Contains(string(buf[:n]), "101") {
+		conn.Close()
+		return nil, errors.New("WebSocket 握手失败")
+	}
+	return conn, nil
+}
+
+// wsSend 发送 WebSocket 文本帧（带 mask）
+func wsSend(conn net.Conn, data []byte) error {
+	frame := []byte{0x81}
+	l := len(data)
+	if l < 126 {
+		frame = append(frame, byte(0x80|l))
+	} else if l < 65536 {
+		frame = append(frame, 0xFE, byte(l>>8), byte(l))
+	}
+	frame = append(frame, 0, 0, 0, 0) // mask key = 0
+	frame = append(frame, data...)
+	_, err := conn.Write(frame)
+	return err
+}
+
+// wsRecv 接收 WebSocket 文本帧
+func wsRecv(conn net.Conn) ([]byte, error) {
+	conn.SetDeadline(time.Now().Add(8 * time.Second)) //nolint
+	header := make([]byte, 2)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return nil, err
+	}
+	length := int(header[1] & 0x7f)
+	if length == 126 {
+		ext := make([]byte, 2)
+		if _, err := io.ReadFull(conn, ext); err != nil {
+			return nil, err
+		}
+		length = int(ext[0])<<8 | int(ext[1])
+	}
+	data := make([]byte, length)
+	if _, err := io.ReadFull(conn, data); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
 func removePopCover(page *rod.Page) {
 
 	// 先移除弹窗封面
@@ -111,36 +315,134 @@ func clickEmptyPosition(page *rod.Page) {
 	page.Mouse.MustMoveTo(float64(x), float64(y)).MustClick(proto.InputMouseButtonLeft)
 }
 
-func mustClickPublishTab(page *rod.Page, tabname string) error {
-	page.MustElement(`div.upload-content`).MustWaitVisible()
+// mustClickPublishTab 切换到目标发布 TAB。
+// devtoolsAddr 用于直接发 Input domain 事件（go-rod browser session 的 Input domain 在 CDP 复用模式下可能超时）。
+func mustClickPublishTab(page *rod.Page, tabname string, devtoolsAddr string) error {
+	// debug: 异步截图，不阻塞主流程
+	go func() {
+		debugPngPath := "/tmp/debug_publish.png"
+		if _, err := os.Stat("/app/data"); err == nil {
+			debugPngPath = "/app/data/debug_publish.png"
+		}
+		if img, err := page.Screenshot(false, nil); err == nil {
+			_ = os.WriteFile(debugPngPath, img, 0644)
+			logrus.Infof("[debug] 截图已保存: %s", debugPngPath)
+		}
+	}()
 
+	// waitElem 用 goroutine+channel 实现真正可超时的 Element 等待
+	// go-rod 的 page.Timeout() 无法中断底层 WebSocket 读取，需要此包装
+	waitElem := func(sel string, timeout time.Duration) (*rod.Element, error) {
+		type result struct {
+			elem *rod.Element
+			err  error
+		}
+		ch := make(chan result, 1)
+		go func() {
+			e, err := page.Element(sel)
+			ch <- result{e, err}
+		}()
+		select {
+		case r := <-ch:
+			return r.elem, r.err
+		case <-time.After(timeout):
+			return nil, errors.Errorf("等待 %s 超时 (%v)", sel, timeout)
+		}
+	}
+
+	// 等待 TAB 栏出现（最多 20 秒），确认 SPA 已渲染
+	if _, err := waitElem(`div.creator-tab`, 20*time.Second); err != nil {
+		return errors.Wrap(err, "页面未找到 TAB 栏（div.creator-tab），SPA 可能未渲染完成")
+	}
+
+	// 查找目标 TAB 并点击（最多重试 15 秒）
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		tab, blocked, err := getTabElement(page, tabname)
-		if err != nil {
-			logrus.Warnf("获取发布 TAB 元素失败: %v", err)
-			time.Sleep(200 * time.Millisecond)
+		type elemsResult struct {
+			elems rod.Elements
+			err   error
+		}
+		ech := make(chan elemsResult, 1)
+		go func() {
+			e, err := page.Elements("div.creator-tab")
+			ech <- elemsResult{e, err}
+		}()
+
+		var elems rod.Elements
+		select {
+		case r := <-ech:
+			if r.err != nil {
+				time.Sleep(300 * time.Millisecond)
+				continue
+			}
+			elems = r.elems
+		case <-time.After(5 * time.Second):
+			logrus.Warn("获取 TAB 元素超时，重试")
+			time.Sleep(300 * time.Millisecond)
 			continue
 		}
 
-		if tab == nil {
-			time.Sleep(200 * time.Millisecond)
+		var target *rod.Element
+		for _, e := range elems {
+			tch := make(chan string, 1)
+			go func(el *rod.Element) {
+				t, _ := el.Text()
+				tch <- t
+			}(e)
+			var text string
+			select {
+			case text = <-tch:
+			case <-time.After(3 * time.Second):
+				continue
+			}
+			if strings.TrimSpace(text) == tabname {
+				target = e
+				break
+			}
+		}
+		if target == nil {
+			time.Sleep(300 * time.Millisecond)
 			continue
 		}
 
-		if blocked {
-			logrus.Info("发布 TAB 被遮挡，尝试移除遮挡")
-			removePopCover(page)
-			time.Sleep(200 * time.Millisecond)
+		// 获取 target 元素的中心坐标，通过 DevTools WebSocket 发送 trusted mouse event
+		type rectResult struct {
+			x, y float64
+			err  error
+		}
+		rch := make(chan rectResult, 1)
+		go func() {
+			box, err := target.Shape()
+			if err != nil || len(box.Quads) == 0 {
+				rch <- rectResult{err: errors.Wrap(err, "获取元素坐标失败")}
+				return
+			}
+			center := box.Quads[0].Center()
+			rch <- rectResult{x: center.X, y: center.Y}
+		}()
+
+		var tx, ty float64
+		select {
+		case r := <-rch:
+			if r.err != nil {
+				logrus.Warnf("获取 TAB 坐标失败: %v，重试", r.err)
+				time.Sleep(300 * time.Millisecond)
+				continue
+			}
+			tx, ty = r.x, r.y
+		case <-time.After(5 * time.Second):
+			logrus.Warn("获取 TAB 坐标超时，重试")
+			time.Sleep(300 * time.Millisecond)
 			continue
 		}
 
-		if err := tab.Click(proto.InputMouseButtonLeft, 1); err != nil {
-			logrus.Warnf("点击发布 TAB 失败: %v", err)
-			time.Sleep(200 * time.Millisecond)
+		// 直接通过 page-level WebSocket 发 trusted Input event
+		if err := clickTabViaDevTools(devtoolsAddr, "creator.xiaohongshu.com", tx, ty); err != nil {
+			logrus.Warnf("DevTools 点击 TAB 失败: %v，重试", err)
+			time.Sleep(300 * time.Millisecond)
 			continue
 		}
-
+		logrus.Infof("已点击发布 TAB: %s (%.0f,%.0f)", tabname, tx, ty)
 		return nil
 	}
 
@@ -264,6 +566,15 @@ func waitForUploadComplete(page *rod.Page, expectedCount int) error {
 		time.Sleep(checkInterval)
 	}
 
+	// debug: 记录页面 DOM，用于排查预览选择器是否失效
+	if html, e := page.Eval(`() => {
+		const area = document.querySelector('.img-preview-area');
+		if (area) return '找到 .img-preview-area: ' + area.innerHTML.substring(0, 500);
+		const divs = document.querySelectorAll('div[class*="preview"]');
+		return '未找到 .img-preview-area，preview divs: ' + Array.from(divs).slice(0,5).map(d => d.className).join(' | ');
+	}`); e == nil {
+		logrus.Warnf("[debug] 上传超时 DOM 快照:\n%s", html.Value.String())
+	}
 	return errors.Errorf("第%d张图片上传超时(60s)，请检查网络连接和图片大小", expectedCount)
 }
 

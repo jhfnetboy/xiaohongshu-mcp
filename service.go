@@ -5,9 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/launcher"
+	"github.com/go-rod/stealth"
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/headless_browser"
 	"github.com/xpzouying/xiaohongshu-mcp/browser"
@@ -18,12 +22,139 @@ import (
 	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 )
 
+// BrowserSession 浏览器 session 接口，支持正常启动和 CDP 连接两种模式
+type BrowserSession interface {
+	NewPage() *rod.Page
+	// GetPage 返回合适的页面。isPersistPage=true 时调用方不应关闭该页面（复用的已有标签页）
+	GetPage() (page *rod.Page, isPersistPage bool)
+	Close()
+}
+
+// cdpBrowserSession 连接已有 Chrome 的 session（CDP 模式）
+type cdpBrowserSession struct {
+	browser *rod.Browser
+}
+
+func (c *cdpBrowserSession) NewPage() *rod.Page {
+	return stealth.MustPage(c.browser)
+}
+
+// GetPage CDP 模式：优先复用已有的 creator 标签页，避免新 tab 被 WAF 检测
+func (c *cdpBrowserSession) GetPage() (*rod.Page, bool) {
+	pages, err := c.browser.Pages()
+	if err == nil {
+		for _, p := range pages {
+			info, e := p.Info()
+			if e == nil && strings.Contains(info.URL, "creator.xiaohongshu.com") {
+				logrus.Infof("[CDP] 复用已有 creator 标签页: %s", info.URL)
+				_, _ = p.Activate() // 确保 tab 在前台（元素才在 viewport 内）
+				return p, true      // 不关闭：这是用户的标签页
+			}
+		}
+		// 没找到 creator tab，复用第一个非空 tab，避免后台 tab viewport 为 0
+		if len(pages) > 0 {
+			logrus.Warn("[CDP] 未找到 creator 标签页，复用第一个已有标签页")
+			p := pages[0]
+			_, _ = p.Activate()
+			return p, false
+		}
+	}
+	logrus.Warn("[CDP] 无现有标签页，创建新标签页")
+	p := stealth.MustPage(c.browser)
+	_, _ = p.Activate()
+	return p, false
+}
+
+func (c *cdpBrowserSession) Close() {
+	// CDP 模式不关闭外部 Chrome，只断开连接
+	_ = c.browser.Close()
+}
+
+// headlessBrowserSession 包装 headless_browser.Browser 实现接口
+type headlessBrowserSession struct {
+	b *headless_browser.Browser
+}
+
+func (h *headlessBrowserSession) NewPage() *rod.Page {
+	return h.b.NewPage()
+}
+
+func (h *headlessBrowserSession) GetPage() (*rod.Page, bool) {
+	return h.b.NewPage(), false
+}
+
+func (h *headlessBrowserSession) Close() {
+	h.b.Close()
+}
+
+// newCDPSession 连接已有 Chrome（通过 remote debugging port）
+func newCDPSession(debugURL string) (BrowserSession, error) {
+	// 从 http://localhost:9222 解析 WebSocket URL
+	wsURL, err := launcher.ResolveURL(debugURL)
+	if err != nil {
+		return nil, err
+	}
+	b := rod.New().ControlURL(wsURL).MustConnect()
+	logrus.Infof("已连接到现有 Chrome: %s", debugURL)
+	return &cdpBrowserSession{browser: b}, nil
+}
+
 // XiaohongshuService 小红书业务服务
-type XiaohongshuService struct{}
+type XiaohongshuService struct {
+	mu             sync.Mutex
+	persistBrowser BrowserSession // 登录后持久保留的浏览器（WAF 指纹绑定）
+}
 
 // NewXiaohongshuService 创建小红书服务实例
 func NewXiaohongshuService() *XiaohongshuService {
 	return &XiaohongshuService{}
+}
+
+// setPersistBrowser 保留浏览器 session，替换旧的
+func (s *XiaohongshuService) setPersistBrowser(sess BrowserSession) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.persistBrowser != nil {
+		s.persistBrowser.Close()
+	}
+	s.persistBrowser = sess
+	logrus.Infof("持久浏览器 session 已更新")
+}
+
+// getBrowser 优先返回持久 session，否则创建临时浏览器
+func (s *XiaohongshuService) getBrowser() (BrowserSession, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.persistBrowser != nil {
+		return s.persistBrowser, true
+	}
+	return &headlessBrowserSession{b: newBrowser()}, false
+}
+
+// withPage 用持久 session 或临时浏览器执行操作
+func (s *XiaohongshuService) withPage(fn func(*rod.Page) error) error {
+	sess, isPersist := s.getBrowser()
+	if !isPersist {
+		defer sess.Close()
+	}
+	page := sess.NewPage()
+	defer page.Close()
+	return fn(page)
+}
+
+// InitCDPSession 启动时若配置了 CHROME_CONNECT_URL，直接连接已有 Chrome
+func (s *XiaohongshuService) InitCDPSession() {
+	connectURL := configs.GetConnectURL()
+	if connectURL == "" {
+		return
+	}
+	sess, err := newCDPSession(connectURL)
+	if err != nil {
+		logrus.Errorf("连接 Chrome CDP 失败: %v", err)
+		return
+	}
+	s.setPersistBrowser(sess)
+	logrus.Infof("CDP 模式：已连接到 %s，直接使用现有 Chrome session", connectURL)
 }
 
 // PublishRequest 发布请求
@@ -132,11 +263,6 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 	b := newBrowser()
 	page := b.NewPage()
 
-	deferFunc := func() {
-		_ = page.Close()
-		b.Close()
-	}
-
 	loginAction := xiaohongshu.NewLogin(page)
 
 	// 浏览器操作使用独立 context，避免 HTTP 客户端断开导致 context canceled
@@ -144,11 +270,20 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 	defer browserCancel()
 
 	img, loggedIn, err := loginAction.FetchQrcodeImage(browserCtx)
-	if err != nil || loggedIn {
-		defer deferFunc()
-	}
 	if err != nil {
+		_ = page.Close()
+		b.Close()
 		return nil, err
+	}
+	if loggedIn {
+		// 已登录：访问 creator 域，建立持久 session
+		if er := establishCreatorSession(page); er != nil {
+			logrus.Warnf("establish creator session failed: %v", er)
+		}
+		if er := saveCookies(page); er != nil {
+			logrus.Errorf("failed to save cookies: %v", er)
+		}
+		s.setPersistBrowser(&headlessBrowserSession{b: b})
 	}
 
 	timeout := 4 * time.Minute
@@ -157,7 +292,6 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 		go func() {
 			ctxTimeout, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
-			defer deferFunc()
 
 			if loginAction.WaitForLogin(ctxTimeout) {
 				// 登录 www 后，访问 creator 域建立创作者 session（获取 creator-specific acw_tc）
@@ -167,6 +301,11 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 				if er := saveCookies(page); er != nil {
 					logrus.Errorf("failed to save cookies: %v", er)
 				}
+				s.setPersistBrowser(&headlessBrowserSession{b: b})
+			} else {
+				// 超时未登录，关闭浏览器
+				_ = page.Close()
+				b.Close()
 			}
 		}()
 	}
@@ -256,13 +395,19 @@ func (s *XiaohongshuService) processImages(images []string) ([]string, error) {
 	return processor.ProcessImages(images)
 }
 
-// publishContent 执行内容发布
+// publishContent 执行内容发布，优先使用持久浏览器（WAF 指纹已绑定）
 func (s *XiaohongshuService) publishContent(ctx context.Context, content xiaohongshu.PublishImageContent) error {
-	b := newBrowser()
-	defer b.Close()
+	b, isPersist := s.getBrowser()
+	if !isPersist {
+		defer b.Close()
+		logrus.Warn("无持久 session，使用临时浏览器（可能因 WAF 指纹不匹配导致失败，请先扫码登录）")
+	}
 
-	page := b.NewPage()
-	defer page.Close()
+	// CDP 模式复用已有标签页，headless 模式创建新页面
+	page, isPersistPage := b.GetPage()
+	if !isPersistPage {
+		defer page.Close()
+	}
 
 	action, err := xiaohongshu.NewPublishImageAction(page)
 	if err != nil {
@@ -589,14 +734,12 @@ func saveCookies(page *rod.Page) error {
 	return cookieLoader.SaveCookies(data)
 }
 
-// withBrowserPage 执行需要浏览器页面的操作的通用函数
+// withBrowserPage 执行需要浏览器页面的操作（保留向后兼容，调用 s.withPage）
 func withBrowserPage(fn func(*rod.Page) error) error {
 	b := newBrowser()
 	defer b.Close()
-
 	page := b.NewPage()
 	defer page.Close()
-
 	return fn(page)
 }
 
