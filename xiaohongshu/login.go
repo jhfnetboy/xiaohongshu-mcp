@@ -113,8 +113,9 @@ func (a *LoginAction) FetchQrcodeImage(ctx context.Context) (string, bool, error
 }
 
 func (a *LoginAction) WaitForLogin(ctx context.Context) bool {
-	pp := a.page.Context(ctx)
-	ticker := time.NewTicker(500 * time.Millisecond)
+	// 每 3 秒重新导航一次检测登录态，比等待当前页面更可靠
+	// （扫码登录后当前页面不会自动刷新成已登录状态）
+	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -122,9 +123,13 @@ func (a *LoginAction) WaitForLogin(ctx context.Context) bool {
 		case <-ctx.Done():
 			return false
 		case <-ticker.C:
-			// 每次最多等 2 秒，避免无超时阻塞整个 ticker 循环
-			el, err := pp.Timeout(2 * time.Second).Element(".main-container .user .link-wrapper .channel")
-			if err == nil && el != nil {
+			pp := a.page.Context(ctx)
+			if err := navigatePage(pp, "https://www.xiaohongshu.com/explore"); err != nil {
+				continue
+			}
+			time.Sleep(1 * time.Second)
+			exists, _, _ := pp.Has(".main-container .user .link-wrapper .channel")
+			if exists {
 				return true
 			}
 		}
