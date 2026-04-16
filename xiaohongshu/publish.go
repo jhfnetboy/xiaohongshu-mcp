@@ -36,25 +36,15 @@ const (
 )
 
 func NewPublishImageAction(page *rod.Page) (*PublishAction, error) {
+	// 不用 WaitLoad：小红书创作者平台是 SPA，load 事件可能永远不触发，
+	// 会耗尽整个 timeout 预算导致后续所有操作 context 已过期
+	pp := page.Timeout(600 * time.Second)
 
-	pp := page.Timeout(300 * time.Second)
-
-	// 使用更稳健的导航和等待策略
 	if err := pp.Navigate(urlOfPublic); err != nil {
 		return nil, errors.Wrap(err, "导航到发布页面失败")
 	}
-
-	// 等待页面加载，使用 WaitLoad 代替 WaitIdle（更宽松）
-	if err := pp.WaitLoad(); err != nil {
-		logrus.Warnf("等待页面加载出现问题: %v，继续尝试", err)
-	}
-	time.Sleep(2 * time.Second)
-
-	// 等待页面稳定
-	if err := pp.WaitDOMStable(time.Second, 0.1); err != nil {
-		logrus.Warnf("等待 DOM 稳定出现问题: %v，继续尝试", err)
-	}
-	time.Sleep(1 * time.Second)
+	// 用固定 sleep 等待 SPA 渲染，替代 WaitLoad
+	time.Sleep(5 * time.Second)
 
 	if err := mustClickPublishTab(pp, "上传图文"); err != nil {
 		logrus.Errorf("点击上传图文 TAB 失败: %v", err)
