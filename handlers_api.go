@@ -56,7 +56,7 @@ func (s *AppServer) checkLoginStatusHandler(c *gin.Context) {
 		return
 	}
 
-	c.Set("account", "ai-report")
+	c.Set("account", "JasonJiao")
 	respondSuccess(c, status, "检查登录状态成功")
 }
 
@@ -183,7 +183,7 @@ func (s *AppServer) listFeedsHandler(c *gin.Context) {
 		return
 	}
 
-	c.Set("account", "ai-report")
+	c.Set("account", "JasonJiao")
 	respondSuccess(c, result, "获取Feeds列表成功")
 }
 
@@ -221,7 +221,7 @@ func (s *AppServer) searchFeedsHandler(c *gin.Context) {
 		return
 	}
 
-	c.Set("account", "ai-report")
+	c.Set("account", "JasonJiao")
 	respondSuccess(c, result, "搜索Feeds成功")
 }
 
@@ -257,7 +257,7 @@ func (s *AppServer) getFeedDetailHandler(c *gin.Context) {
 		return
 	}
 
-	c.Set("account", "ai-report")
+	c.Set("account", "JasonJiao")
 	respondSuccess(c, result, "获取Feed详情成功")
 }
 
@@ -278,7 +278,7 @@ func (s *AppServer) userProfileHandler(c *gin.Context) {
 		return
 	}
 
-	c.Set("account", "ai-report")
+	c.Set("account", "JasonJiao")
 	respondSuccess(c, map[string]any{"data": result}, "result.Message")
 }
 
@@ -299,7 +299,7 @@ func (s *AppServer) postCommentHandler(c *gin.Context) {
 		return
 	}
 
-	c.Set("account", "ai-report")
+	c.Set("account", "JasonJiao")
 	respondSuccess(c, result, result.Message)
 }
 
@@ -319,7 +319,7 @@ func (s *AppServer) replyCommentHandler(c *gin.Context) {
 		return
 	}
 
-	c.Set("account", "ai-report")
+	c.Set("account", "JasonJiao")
 	respondSuccess(c, result, result.Message)
 }
 
@@ -328,7 +328,7 @@ func healthHandler(c *gin.Context) {
 	respondSuccess(c, map[string]any{
 		"status":    "healthy",
 		"service":   "xiaohongshu-mcp",
-		"account":   "ai-report",
+		"account":   "JasonJiao",
 		"timestamp": "now",
 	}, "服务正常")
 }
@@ -343,6 +343,6 @@ func (s *AppServer) myProfileHandler(c *gin.Context) {
 		return
 	}
 
-	c.Set("account", "ai-report")
+	c.Set("account", "JasonJiao")
 	respondSuccess(c, map[string]any{"data": result}, "获取我的主页成功")
 }
