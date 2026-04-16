@@ -18,7 +18,6 @@ func NewLogin(page *rod.Page) *LoginAction {
 }
 
 // navigatePage 导航到指定 URL，Navigate 后 sleep 等待 SPA 初始渲染
-// 不使用 WaitNavigation，避免 DOMContentLoaded 事件已触发导致永久阻塞
 func navigatePage(page *rod.Page, url string) error {
 	if err := page.Navigate(url); err != nil {
 		return errors.Wrap(err, "navigate failed")
@@ -27,22 +26,30 @@ func navigatePage(page *rod.Page, url string) error {
 	return nil
 }
 
+// isLoggedIn 检测登录状态：优先查 web_session cookie，兜底查 DOM 元素
+func isLoggedIn(pp *rod.Page) bool {
+	// 方法1：检查 web_session cookie（更可靠，不依赖 DOM 结构）
+	cookies, err := pp.Cookies([]string{"https://www.xiaohongshu.com"})
+	if err == nil {
+		for _, c := range cookies {
+			if c.Name == "web_session" && c.Value != "" {
+				return true
+			}
+		}
+	}
+	// 方法2：检查已登录用户 DOM 元素（兜底）
+	exists, _, _ := pp.Has(".main-container .user .link-wrapper .channel")
+	return exists
+}
+
 func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
 	pp := a.page.Context(ctx)
 
 	if err := navigatePage(pp, "https://www.xiaohongshu.com/explore"); err != nil {
 		return false, err
 	}
-	time.Sleep(1 * time.Second)
 
-	exists, _, err := pp.Has(`.main-container .user .link-wrapper .channel`)
-	if err != nil {
-		return false, errors.Wrap(err, "check login status failed")
-	}
-	if !exists {
-		return false, nil
-	}
-	return true, nil
+	return isLoggedIn(pp), nil
 }
 
 func (a *LoginAction) Login(ctx context.Context) error {
@@ -51,9 +58,8 @@ func (a *LoginAction) Login(ctx context.Context) error {
 	if err := navigatePage(pp, "https://www.xiaohongshu.com/explore"); err != nil {
 		return err
 	}
-	time.Sleep(2 * time.Second)
 
-	if exists, _, _ := pp.Has(".main-container .user .link-wrapper .channel"); exists {
+	if isLoggedIn(pp) {
 		return nil
 	}
 
@@ -71,7 +77,7 @@ func (a *LoginAction) FetchQrcodeImage(ctx context.Context) (string, bool, error
 	time.Sleep(3 * time.Second)
 
 	// 已登录则直接返回
-	if exists, _, _ := pp.Has(".main-container .user .link-wrapper .channel"); exists {
+	if isLoggedIn(pp) {
 		return "", true, nil
 	}
 
@@ -113,8 +119,7 @@ func (a *LoginAction) FetchQrcodeImage(ctx context.Context) (string, bool, error
 }
 
 func (a *LoginAction) WaitForLogin(ctx context.Context) bool {
-	// 每 3 秒重新导航一次检测登录态，比等待当前页面更可靠
-	// （扫码登录后当前页面不会自动刷新成已登录状态）
+	// 每 3 秒重新导航检测登录态（扫码后当前页面不自动刷新）
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
@@ -127,9 +132,7 @@ func (a *LoginAction) WaitForLogin(ctx context.Context) bool {
 			if err := navigatePage(pp, "https://www.xiaohongshu.com/explore"); err != nil {
 				continue
 			}
-			time.Sleep(1 * time.Second)
-			exists, _, _ := pp.Has(".main-container .user .link-wrapper .channel")
-			if exists {
+			if isLoggedIn(pp) {
 				return true
 			}
 		}
