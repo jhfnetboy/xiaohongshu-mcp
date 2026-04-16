@@ -27,7 +27,7 @@ jobs:
     - name: Log in to Docker Hub
       uses: docker/login-action@v3
       with:
-        username: jhfnetboy
+        username: aastar
         password: ${{ secrets.DOCKERHUB_TOKEN }}
 
     - name: Build and push multi-arch Docker image
@@ -38,7 +38,7 @@ jobs:
         push: true
         platforms: linux/amd64,linux/arm64
         tags: |
-          jhfnetboy/xiaohongshu-mcp:${{ github.event.inputs.version }}
-          jhfnetboy/xiaohongshu-mcp:latest
+          aastar/xiaohongshu-mcp:${{ github.event.inputs.version }}
+          aastar/xiaohongshu-mcp:latest
         cache-from: type=gha
         cache-to: type=gha,mode=max
