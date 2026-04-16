@@ -17,13 +17,13 @@ func NewLogin(page *rod.Page) *LoginAction {
 	return &LoginAction{page: page}
 }
 
-// navigatePage 导航到指定 URL，等待 DOMContentLoaded（而非 load 事件，避免 SPA 阻塞）
+// navigatePage 导航到指定 URL，Navigate 后 sleep 等待 SPA 初始渲染
+// 不使用 WaitNavigation，避免 DOMContentLoaded 事件已触发导致永久阻塞
 func navigatePage(page *rod.Page, url string) error {
-	waitNav := page.WaitNavigation(proto.PageLifecycleEventNameDOMContentLoaded)
 	if err := page.Navigate(url); err != nil {
 		return errors.Wrap(err, "navigate failed")
 	}
-	waitNav()
+	time.Sleep(4 * time.Second)
 	return nil
 }
 
@@ -75,8 +75,8 @@ func (a *LoginAction) FetchQrcodeImage(ctx context.Context) (string, bool, error
 		return "", true, nil
 	}
 
-	// 点击"创作中心"按钮触发登录弹窗
-	if btn, err := pp.Element(".reds-button-new.channel-btn"); err == nil {
+	// 点击"创作中心"按钮触发登录弹窗（5秒内找不到则跳过）
+	if btn, err := pp.Timeout(5 * time.Second).Element(".reds-button-new.channel-btn"); err == nil {
 		_ = btn.Click(proto.InputMouseButtonLeft, 1)
 		time.Sleep(3 * time.Second)
 	}
