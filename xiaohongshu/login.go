@@ -122,7 +122,8 @@ func (a *LoginAction) WaitForLogin(ctx context.Context) bool {
 		case <-ctx.Done():
 			return false
 		case <-ticker.C:
-			el, err := pp.Element(".main-container .user .link-wrapper .channel")
+			// 每次最多等 2 秒，避免无超时阻塞整个 ticker 循环
+			el, err := pp.Timeout(2 * time.Second).Element(".main-container .user .link-wrapper .channel")
 			if err == nil && el != nil {
 				return true
 			}
