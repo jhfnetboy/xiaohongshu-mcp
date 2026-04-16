@@ -1,0 +1,95 @@
+# 多架构统一 Dockerfile（amd64 + arm64）
+# amd64: 安装 Google Chrome
+# arm64: 依赖 go-rod 自动下载 ARM64 Chromium
+
+# ---- build stage ----
+FROM --platform=$BUILDPLATFORM golang:1.24 AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /src
+ENV GOPROXY=https://goproxy.cn,direct
+ENV GOSUMDB=sum.golang.google.cn
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-s -w" -o /out/app .
+
+# ---- run stage ----
+FROM ubuntu:22.04
+
+ARG TARGETARCH
+
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+WORKDIR /app
+
+# 配置阿里云镜像源
+RUN apt-get update && apt-get install -y ca-certificates wget gnupg && \
+    sed -i 's|http://archive.ubuntu.com|https://mirrors.aliyun.com|g' /etc/apt/sources.list && \
+    sed -i 's|http://security.ubuntu.com|https://mirrors.aliyun.com|g' /etc/apt/sources.list
+
+# 安装公共依赖
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    fonts-liberation \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libc6 \
+    libcairo2 \
+    libcups2 \
+    libdbus-1-3 \
+    libexpat1 \
+    libfontconfig1 \
+    libgbm1 \
+    libgcc1 \
+    libglib2.0-0 \
+    libgtk-3-0 \
+    libnspr4 \
+    libnss3 \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libstdc++6 \
+    libx11-6 \
+    libx11-xcb1 \
+    libxcb1 \
+    libxcomposite1 \
+    libxcursor1 \
+    libxdamage1 \
+    libxext6 \
+    libxfixes3 \
+    libxi6 \
+    libxrandr2 \
+    libxrender1 \
+    libxss1 \
+    libxtst6 \
+    lsb-release \
+    wget \
+    xdg-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# amd64: 安装 Google Chrome；arm64: 跳过（go-rod 运行时自动下载 Chromium）
+RUN if [ "$TARGETARCH" = "amd64" ]; then \
+      wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/googlechrome-linux-keyring.gpg && \
+      echo "deb [arch=amd64 signed-by=/usr/share/keyrings/googlechrome-linux-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list && \
+      apt-get update && apt-get install -y --no-install-recommends google-chrome-stable && \
+      rm -rf /var/lib/apt/lists/*; \
+    fi
+
+COPY --from=builder /out/app .
+
+RUN mkdir -p /app/images && chmod 777 /app/images
+
+# entrypoint: 若存在 Google Chrome 则指定路径，否则 go-rod 自动检测
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
+EXPOSE 18060
+
+ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["./app"]
