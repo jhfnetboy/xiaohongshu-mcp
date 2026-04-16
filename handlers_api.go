@@ -2,7 +2,12 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
@@ -11,6 +16,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 )
+
+const tmpImageDir = "/app/data/tmp"
 
 // respondError 返回错误响应
 func respondError(c *gin.Context, statusCode int, code, message string, details any) {
@@ -82,6 +89,39 @@ func (s *AppServer) deleteCookiesHandler(c *gin.Context) {
 	}, "删除 cookies 成功")
 }
 
+// uploadImageHandler 接收图片上传，存到 /app/data/tmp/，返回容器内路径
+func (s *AppServer) uploadImageHandler(c *gin.Context) {
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		respondError(c, http.StatusBadRequest, "UPLOAD_FAILED", "上传失败", err.Error())
+		return
+	}
+	defer file.Close()
+
+	if err := os.MkdirAll(tmpImageDir, 0755); err != nil {
+		respondError(c, http.StatusInternalServerError, "UPLOAD_FAILED", "创建目录失败", err.Error())
+		return
+	}
+
+	ext := filepath.Ext(header.Filename)
+	dstPath := filepath.Join(tmpImageDir, fmt.Sprintf("%d%s", time.Now().UnixNano(), ext))
+
+	dst, err := os.Create(dstPath)
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, "UPLOAD_FAILED", "保存文件失败", err.Error())
+		return
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, file); err != nil {
+		respondError(c, http.StatusInternalServerError, "UPLOAD_FAILED", "写入失败", err.Error())
+		return
+	}
+
+	logrus.Infof("图片已上传: %s (%d bytes)", dstPath, header.Size)
+	respondSuccess(c, map[string]string{"path": dstPath}, "上传成功")
+}
+
 // publishHandler 发布内容
 func (s *AppServer) publishHandler(c *gin.Context) {
 	var req PublishRequest
@@ -96,6 +136,14 @@ func (s *AppServer) publishHandler(c *gin.Context) {
 	defer cancel()
 
 	result, err := s.xiaohongshuService.PublishContent(ctx, &req)
+
+	// 清理本次上传的临时图片
+	for _, img := range req.Images {
+		if strings.HasPrefix(img, tmpImageDir) {
+			_ = os.Remove(img)
+		}
+	}
+
 	if err != nil {
 		respondError(c, http.StatusInternalServerError, "PUBLISH_FAILED",
 			"发布失败", err.Error())
