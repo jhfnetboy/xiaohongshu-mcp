@@ -110,7 +110,11 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 
 	loginAction := xiaohongshu.NewLogin(page)
 
-	isLoggedIn, err := loginAction.CheckLoginStatus(ctx)
+	// 浏览器操作使用独立 context，避免 HTTP 客户端断开导致 context canceled
+	browserCtx, browserCancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer browserCancel()
+
+	isLoggedIn, err := loginAction.CheckLoginStatus(browserCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +139,11 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 
 	loginAction := xiaohongshu.NewLogin(page)
 
-	img, loggedIn, err := loginAction.FetchQrcodeImage(ctx)
+	// 浏览器操作使用独立 context，避免 HTTP 客户端断开导致 context canceled
+	browserCtx, browserCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer browserCancel()
+
+	img, loggedIn, err := loginAction.FetchQrcodeImage(browserCtx)
 	if err != nil || loggedIn {
 		defer deferFunc()
 	}
