@@ -43,8 +43,14 @@ func NewPublishImageAction(page *rod.Page) (*PublishAction, error) {
 	if err := pp.Navigate(urlOfPublic); err != nil {
 		return nil, errors.Wrap(err, "导航到发布页面失败")
 	}
-	// 用固定 sleep 等待 SPA 渲染，替代 WaitLoad
+	// 等待 SPA 渲染
 	time.Sleep(5 * time.Second)
+
+	// 快速检测：如果跳转到了登录页，说明 session 失效，立即返回错误
+	info, _ := pp.Info()
+	if info != nil && strings.Contains(info.URL, "/login") {
+		return nil, errors.New("creator session 失效，请重新扫码登录（DELETE /api/v1/login/cookies 后重新获取二维码）")
+	}
 
 	if err := mustClickPublishTab(pp, "上传图文"); err != nil {
 		logrus.Errorf("点击上传图文 TAB 失败: %v", err)

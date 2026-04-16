@@ -160,6 +160,10 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 			defer deferFunc()
 
 			if loginAction.WaitForLogin(ctxTimeout) {
+				// 登录 www 后，访问 creator 域建立创作者 session（获取 creator-specific acw_tc）
+				if er := establishCreatorSession(page); er != nil {
+					logrus.Warnf("establish creator session failed: %v", er)
+				}
 				if er := saveCookies(page); er != nil {
 					logrus.Errorf("failed to save cookies: %v", er)
 				}
@@ -555,6 +559,19 @@ func (s *XiaohongshuService) ReplyCommentToFeed(ctx context.Context, feedID, xse
 
 func newBrowser() *headless_browser.Browser {
 	return browser.NewBrowser(configs.IsHeadless(), browser.WithBinPath(configs.GetBinPath()))
+}
+
+// establishCreatorSession 登录 www 后访问 creator 子域，让浏览器建立创作者 session。
+// creator.xiaohongshu.com 需要独立的 acw_tc WAF cookie，必须由浏览器（stealth mode）访问后自动设置。
+func establishCreatorSession(page *rod.Page) error {
+	const creatorURL = "https://creator.xiaohongshu.com/publish/publish?source=official"
+	if err := page.Navigate(creatorURL); err != nil {
+		return err
+	}
+	// 等待 WAF cookie 和页面 JS 初始化
+	time.Sleep(6 * time.Second)
+	logrus.Infof("creator session established, current url: %s", page.MustInfo().URL)
+	return nil
 }
 
 func saveCookies(page *rod.Page) error {
