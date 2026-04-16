@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/proto"
 	"github.com/pkg/errors"
 )
 
@@ -37,20 +38,14 @@ func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
 func (a *LoginAction) Login(ctx context.Context) error {
 	pp := a.page.Context(ctx)
 
-	// 导航到小红书首页，这会触发二维码弹窗
 	pp.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
 
-	// 等待一小段时间让页面完全加载
 	time.Sleep(2 * time.Second)
 
-	// 检查是否已经登录
 	if exists, _, _ := pp.Has(".main-container .user .link-wrapper .channel"); exists {
-		// 已经登录，直接返回
 		return nil
 	}
 
-	// 等待扫码成功提示或者登录完成
-	// 这里我们等待登录成功的元素出现，这样更简单可靠
 	pp.MustElement(".main-container .user .link-wrapper .channel")
 
 	return nil
@@ -59,24 +54,47 @@ func (a *LoginAction) Login(ctx context.Context) error {
 func (a *LoginAction) FetchQrcodeImage(ctx context.Context) (string, bool, error) {
 	pp := a.page.Context(ctx)
 
-	// 导航到小红书首页，这会触发二维码弹窗
 	pp.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
 
-	// 等待一小段时间让页面完全加载
 	time.Sleep(2 * time.Second)
 
-	// 检查是否已经登录
+	// 已登录则直接返回
 	if exists, _, _ := pp.Has(".main-container .user .link-wrapper .channel"); exists {
 		return "", true, nil
 	}
 
-	// 获取二维码图片
-	src, err := pp.MustElement(".login-container .qrcode-img").Attribute("src")
-	if err != nil {
-		return "", false, errors.Wrap(err, "get qrcode src failed")
+	// 点击"创作中心"按钮触发登录弹窗
+	if btn, err := pp.Element(".reds-button-new.channel-btn"); err == nil {
+		_ = btn.Click(proto.InputMouseButtonLeft, 1)
+		time.Sleep(2 * time.Second)
 	}
-	if src == nil || len(*src) == 0 {
-		return "", false, errors.New("qrcode src is empty")
+
+	// 等待二维码出现（新版 class: .qrcode-img-box .qrcode-img）
+	qrcodeSelectors := []string{
+		".qrcode-img-box .qrcode-img",
+		".qrcode-img",
+		".login-container .qrcode-img",
+	}
+
+	var src *string
+	var lastErr error
+	for _, sel := range qrcodeSelectors {
+		el, err := pp.Timeout(10 * time.Second).Element(sel)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		s, err := el.Attribute("src")
+		if err != nil || s == nil || *s == "" {
+			lastErr = errors.New("qrcode src is empty")
+			continue
+		}
+		src = s
+		lastErr = nil
+		break
+	}
+	if lastErr != nil {
+		return "", false, errors.Wrap(lastErr, "get qrcode failed")
 	}
 
 	return *src, false, nil
